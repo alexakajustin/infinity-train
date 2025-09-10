@@ -2,83 +2,101 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace Assets.Scripts.MapGenerator.Generators
+public class TexturesGenerator : MonoBehaviour
 {
-    public class TexturesGenerator : MonoBehaviour
+    [Header("Chunk Reference(DO NOT ASSIGN MANUALLY!)")]
+    [SerializeField]
+    private Chunk chunk;
+
+    private void Awake()
     {
-        [Serializable]
-        public class TextureData
+        chunk = GetComponent<Chunk>();
+    }
+
+    private bool hasStartedGeneration = false;
+
+    private void Update()
+    {
+        if(chunk.heightsGenerator.hasFinishedGeneration && !hasStartedGeneration)
         {
-            public Texture2D Texture;
-            public Vector2 TileSize = new Vector2(10, 10);
-            public float MinSteepness; // Minimum steepness to apply this texture
-            public float MaxSteepness; // Maximum steepness to apply this texture
+            hasStartedGeneration = true;
+            Debug.Log("Textures generation started.");
+            Generate();
+        }
+    }
+
+    [Serializable]
+    public class TextureData
+    {
+        public Texture2D Texture;
+        public Vector2 TileSize = new Vector2(10, 10);
+        public float MinSteepness; // Minimum steepness to apply this texture
+        public float MaxSteepness; // Maximum steepness to apply this texture
+    }
+
+    public List<TextureData> textures = new List<TextureData>();
+
+    public void Generate()
+    {
+        if (textures == null || textures.Count == 0)
+        {
+            Debug.LogError("No textures assigned!");
+            return;
         }
 
-        public List<TextureData> textures = new List<TextureData>();
+        TerrainData terrainData = chunk.terrain.terrainData;
 
-        public void Generate(float offset)
+        // Set up TerrainLayers
+        TerrainLayer[] terrainLayers = new TerrainLayer[textures.Count];
+        for (int i = 0; i < textures.Count; i++)
         {
-            if (textures == null || textures.Count == 0)
+            if (textures[i].Texture == null)
             {
-                Debug.LogError("No textures assigned!");
-                return;
+                Debug.LogError($"Texture {i} is missing. Please assign a valid texture.");
+                continue;
             }
 
-            TerrainData terrainData = Terrain.activeTerrain.terrainData;
-
-            // Set up TerrainLayers
-            TerrainLayer[] terrainLayers = new TerrainLayer[textures.Count];
-            for (int i = 0; i < textures.Count; i++)
+            TerrainLayer layer = new TerrainLayer
             {
-                if (textures[i].Texture == null)
-                {
-                    Debug.LogError($"Texture {i} is missing. Please assign a valid texture.");
-                    continue;
-                }
+                diffuseTexture = textures[i].Texture,
+                tileSize = textures[i].TileSize
+            };
+            terrainLayers[i] = layer;
+        }
+        terrainData.terrainLayers = terrainLayers;
 
-                TerrainLayer layer = new TerrainLayer
-                {
-                    diffuseTexture = textures[i].Texture,
-                    tileSize = textures[i].TileSize
-                };
-                terrainLayers[i] = layer;
-            }
-            terrainData.terrainLayers = terrainLayers;
+        // Prepare alpha maps
+        float[,,] splatmaps = new float[terrainData.alphamapResolution, terrainData.alphamapResolution, textures.Count];
 
-            // Prepare alpha maps
-            float[,,] splatmaps = new float[terrainData.alphamapResolution, terrainData.alphamapResolution, textures.Count];
-
-            for (int x = 0; x < terrainData.alphamapResolution; x++)
+        for (int x = 0; x < terrainData.alphamapResolution; x++)
+        {
+            for (int y = 0; y < terrainData.alphamapResolution; y++)
             {
-                for (int y = 0; y < terrainData.alphamapResolution; y++)
+                // Get normalized position
+                float normalizedX = (float)x / terrainData.alphamapResolution;
+                float normalizedY = (float)y / terrainData.alphamapResolution;
+
+                // Get steepness
+                float steepness = terrainData.GetSteepness(normalizedX, normalizedY);
+
+                // Assign textures based on steepness
+                for (int i = 0; i < textures.Count; i++)
                 {
-                    // Get normalized position
-                    float normalizedX = (float)x / terrainData.alphamapResolution;
-                    float normalizedY = (float)y / terrainData.alphamapResolution;
+                    var texture = textures[i];
 
-                    // Get steepness
-                    float steepness = terrainData.GetSteepness(normalizedX, normalizedY);
-
-                    // Assign textures based on steepness
-                    for (int i = 0; i < textures.Count; i++)
+                    if (steepness >= texture.MinSteepness && steepness <= texture.MaxSteepness)
                     {
-                        var texture = textures[i];
-
-                        if (steepness >= texture.MinSteepness && steepness <= texture.MaxSteepness)
-                        {
-                            splatmaps[y, x, i] = 1f; // Fully apply this texture
-                        }
-                        else
-                        {
-                            splatmaps[y, x, i] = 0f; // Exclude this texture
-                        }
+                        splatmaps[y, x, i] = 1f; // Fully apply this texture
+                    }
+                    else
+                    {
+                        splatmaps[y, x, i] = 0f; // Exclude this texture
                     }
                 }
             }
-
-            // Apply the alpha maps to the terrain
-            terrainData.SetAlphamaps(0, 0, splatmaps);
         }
+
+        // Apply the alpha maps to the terrain
+        terrainData.SetAlphamaps(0, 0, splatmaps);
     }
 }

@@ -1,9 +1,8 @@
-﻿using Assets.Scripts.MapGenerator.Abstract;
-using UnityEngine;
+﻿using UnityEngine;
 
 namespace Assets.Scripts.MapGenerator.Maps
 {
-    public class PerlinMap : IMap
+    public class PerlinMap 
     {
         public int Size { get; set; }
 
