@@ -23,6 +23,40 @@ public class HeightsGenerator : MonoBehaviour
     [Tooltip("Milliseconds to wait between chunks to prevent frame drops")]
     public int chunkDelayMs = 10;
 
+    [Tooltip("Add randomness to break symmetry")]
+    public float asymmetryStrength = 0.3f;
+
+    [Header("Falloff Settings")]
+    [Tooltip("How far from edges the falloff starts (0.1 = 10% of terrain size)")]
+    [Range(0.05f, 0.5f)]
+    public float falloffDistance = 0.25f;
+
+    [Tooltip("Smoothness of the falloff curve - higher values = more gradual")]
+    [Range(1f, 10f)]
+    public float falloffSmoothness = 3f;
+
+    [Tooltip("Type of falloff curve to use")]
+    public FalloffType falloffType = FalloffType.SmoothStep;
+
+    [Tooltip("Minimum height at edges (as fraction of base elevation)")]
+    [Range(0f, 1f)]
+    public float edgeMinHeight = 0.5f;
+
+    [Tooltip("Use radial falloff instead of edge-based falloff")]
+    public bool useRadialFalloff = false;
+
+    [Tooltip("Custom falloff curve - only used if FalloffType is Custom")]
+    public AnimationCurve customFalloffCurve = AnimationCurve.EaseInOut(0, 0, 1, 1);
+
+    public enum FalloffType
+    {
+        Linear,
+        SmoothStep,
+        Exponential,
+        Cosine,
+        Custom
+    }
+
     public TerrainIteration[] iterations;
     public Terrain terrain;
     public Erosion erosion;
@@ -122,9 +156,16 @@ public class HeightsGenerator : MonoBehaviour
 
         if (token.IsCancellationRequested) yield break;
 
-        // Apply edge falloff
+        // Apply smooth falloff
         generationProgress = 0.7f;
-        yield return StartCoroutine(ApplyEdgeFalloff(heights, token));
+        if (useRadialFalloff)
+        {
+            yield return StartCoroutine(ApplyGradientFalloff(heights, prng, token));
+        }
+        else
+        {
+            yield return StartCoroutine(ApplyAsymmetricFalloff(heights, prng, token));
+        }
 
         if (token.IsCancellationRequested) yield break;
 
@@ -166,7 +207,14 @@ public class HeightsGenerator : MonoBehaviour
             {
                 iteration = iter,
                 seedOffsetX = (float)prng.NextDouble() * 10000f,
-                seedOffsetY = (float)prng.NextDouble() * 10000f
+                seedOffsetY = (float)prng.NextDouble() * 10000f,
+                // Add unique rotation and scale per iteration to break symmetry
+                rotationAngle = (float)prng.NextDouble() * 360f,
+                scaleVariationX = 0.8f + (float)prng.NextDouble() * 0.4f, // 0.8 to 1.2
+                scaleVariationY = 0.8f + (float)prng.NextDouble() * 0.4f, // 0.8 to 1.2
+                // Add domain warping offsets
+                warpOffsetX = (float)prng.NextDouble() * 1000f,
+                warpOffsetY = (float)prng.NextDouble() * 1000f
             });
         }
 
@@ -223,8 +271,7 @@ public class HeightsGenerator : MonoBehaviour
                 float totalHeight = 0f;
                 foreach (var data in iterationData)
                 {
-                    totalHeight += CalculateHeight(x, y, data.iteration, terrainWorldPos,
-                                                 resolution, maxTerrainDepth, data.seedOffsetX, data.seedOffsetY);
+                    totalHeight += CalculateHeight(x, y, data, terrainWorldPos, resolution, maxTerrainDepth);
                 }
                 heights[x, y] = totalHeight;
             }
@@ -273,9 +320,16 @@ public class HeightsGenerator : MonoBehaviour
         }
     }
 
-    private IEnumerator ApplyEdgeFalloff(float[,] heights, CancellationToken token)
+    // Improved asymmetric falloff with smooth transitions
+    private IEnumerator ApplyAsymmetricFalloff(float[,] heights, System.Random prng, CancellationToken token)
     {
         int chunkSize = Mathf.CeilToInt((float)resolution / processingChunks);
+
+        // Generate variation in falloff parameters for natural asymmetry
+        float leftVariation = 0.8f + (float)prng.NextDouble() * 0.4f;    // 0.8 to 1.2
+        float rightVariation = 0.8f + (float)prng.NextDouble() * 0.4f;
+        float topVariation = 0.8f + (float)prng.NextDouble() * 0.4f;
+        float bottomVariation = 0.8f + (float)prng.NextDouble() * 0.4f;
 
         for (int chunk = 0; chunk < processingChunks; chunk++)
         {
@@ -283,24 +337,49 @@ public class HeightsGenerator : MonoBehaviour
 
             int startX = chunk * chunkSize;
             int endX = Mathf.Min(startX + chunkSize, resolution);
-            float baseElev = baseElevation; // Copy to local variable for thread safety
-            int res = resolution; // Copy to local variable for thread safety
+
+            // Copy values for thread safety
+            float baseElev = baseElevation;
+            float falloffDist = falloffDistance;
+            float smoothness = falloffSmoothness;
+            FalloffType fType = falloffType;
+            AnimationCurve curve = new AnimationCurve(customFalloffCurve.keys);
+            float minHeight = edgeMinHeight;
+            int res = resolution;
 
             Task chunkTask = Task.Run(() =>
             {
                 for (int x = startX; x < endX; x++)
                 {
                     if (token.IsCancellationRequested) return;
+
                     for (int y = 0; y < res; y++)
                     {
                         if (token.IsCancellationRequested) return;
 
-                        float edgeX = Mathf.Min((float)x / (res - 1), 1f - (float)x / (res - 1));
-                        float edgeY = Mathf.Min((float)y / (res - 1), 1f - (float)y / (res - 1));
-                        float edgeFactor = Mathf.Min(edgeX, edgeY) * 2f;
-                        float falloff = Mathf.SmoothStep(0, 1, edgeFactor);
+                        float normalizedX = (float)x / (res - 1);
+                        float normalizedY = (float)y / (res - 1);
 
-                        heights[x, y] = Mathf.Lerp(baseElev, heights[x, y], falloff);
+                        // Calculate distance from each edge with variations
+                        float distFromLeft = normalizedX / (falloffDist * leftVariation);
+                        float distFromRight = (1f - normalizedX) / (falloffDist * rightVariation);
+                        float distFromTop = normalizedY / (falloffDist * topVariation);
+                        float distFromBottom = (1f - normalizedY) / (falloffDist * bottomVariation);
+
+                        // Find the minimum distance to any edge
+                        float edgeDistance = Mathf.Min(
+                            Mathf.Min(distFromLeft, distFromRight),
+                            Mathf.Min(distFromTop, distFromBottom)
+                        );
+
+                        // Apply falloff curve based on selected type
+                        float falloffFactor = CalculateFalloffFactor(edgeDistance, smoothness, fType, curve);
+
+                        // Calculate target height at edges
+                        float edgeHeight = baseElev * minHeight;
+
+                        // Interpolate between edge height and full height
+                        heights[x, y] = Mathf.Lerp(edgeHeight, heights[x, y], falloffFactor);
                     }
                 }
             }, token);
@@ -313,12 +392,127 @@ public class HeightsGenerator : MonoBehaviour
 
             if (chunkTask.Exception != null)
             {
-                Debug.LogError($"Edge falloff error: {chunkTask.Exception.GetBaseException().Message}");
+                Debug.LogError($"Smooth falloff error: {chunkTask.Exception.GetBaseException().Message}");
                 yield break;
             }
 
             if (chunkDelayMs > 0)
                 yield return new WaitForSecondsRealtime(chunkDelayMs / 1000f);
+        }
+    }
+
+    // Radial falloff from center for island-like terrain
+    private IEnumerator ApplyGradientFalloff(float[,] heights, System.Random prng, CancellationToken token)
+    {
+        int chunkSize = Mathf.CeilToInt((float)resolution / processingChunks);
+
+        for (int chunk = 0; chunk < processingChunks; chunk++)
+        {
+            if (token.IsCancellationRequested) yield break;
+
+            int startX = chunk * chunkSize;
+            int endX = Mathf.Min(startX + chunkSize, resolution);
+
+            float baseElev = baseElevation;
+            float falloffDist = falloffDistance;
+            float smoothness = falloffSmoothness;
+            FalloffType fType = falloffType;
+            AnimationCurve curve = new AnimationCurve(customFalloffCurve.keys);
+            float minHeight = edgeMinHeight;
+            int res = resolution;
+
+            Task chunkTask = Task.Run(() =>
+            {
+                for (int x = startX; x < endX; x++)
+                {
+                    if (token.IsCancellationRequested) return;
+
+                    for (int y = 0; y < res; y++)
+                    {
+                        if (token.IsCancellationRequested) return;
+
+                        float normalizedX = (float)x / (res - 1);
+                        float normalizedY = (float)y / (res - 1);
+
+                        // Create a radial falloff from center
+                        float centerX = 0.5f;
+                        float centerY = 0.5f;
+                        float distanceFromCenter = Mathf.Sqrt(
+                            Mathf.Pow(normalizedX - centerX, 2) +
+                            Mathf.Pow(normalizedY - centerY, 2)
+                        );
+
+                        // Normalize to 0-1 range (max distance from center to corner)
+                        float maxDistance = Mathf.Sqrt(0.5f); // Distance from center to corner
+                        distanceFromCenter /= maxDistance;
+
+                        // Apply falloff based on distance from center
+                        float falloffStart = 1f - falloffDist; // Start falloff this far from center
+                        float falloffFactor = 1f;
+
+                        if (distanceFromCenter > falloffStart)
+                        {
+                            float falloffRange = 1f - falloffStart;
+                            float falloffProgress = (distanceFromCenter - falloffStart) / falloffRange;
+                            falloffProgress = Mathf.Clamp01(falloffProgress);
+
+                            // Use the selected falloff curve
+                            falloffFactor = 1f - CalculateFalloffFactor(1f - falloffProgress, smoothness, fType, curve);
+                        }
+
+                        // Calculate target height
+                        float edgeHeight = baseElev * minHeight;
+                        heights[x, y] = Mathf.Lerp(edgeHeight, heights[x, y], falloffFactor);
+                    }
+                }
+            }, token);
+
+            while (!chunkTask.IsCompleted)
+            {
+                if (token.IsCancellationRequested) yield break;
+                yield return null;
+            }
+
+            if (chunkTask.Exception != null)
+            {
+                Debug.LogError($"Gradient falloff error: {chunkTask.Exception.GetBaseException().Message}");
+                yield break;
+            }
+
+            if (chunkDelayMs > 0)
+                yield return new WaitForSecondsRealtime(chunkDelayMs / 1000f);
+        }
+    }
+
+    // Calculate different falloff curves
+    private static float CalculateFalloffFactor(float edgeDistance, float smoothness, FalloffType falloffType, AnimationCurve customCurve)
+    {
+        float t = Mathf.Clamp01(edgeDistance);
+
+        switch (falloffType)
+        {
+            case FalloffType.Linear:
+                return t;
+
+            case FalloffType.SmoothStep:
+                // Apply smoothness by raising to a power
+                float smoothT = Mathf.Pow(t, 1f / smoothness);
+                return Mathf.SmoothStep(0f, 1f, smoothT);
+
+            case FalloffType.Exponential:
+                // Exponential falloff - more dramatic
+                return 1f - Mathf.Exp(-t * smoothness);
+
+            case FalloffType.Cosine:
+                // Cosine-based falloff - very smooth
+                float cosT = Mathf.Pow(t, 1f / smoothness);
+                return 0.5f * (1f - Mathf.Cos(cosT * Mathf.PI));
+
+            case FalloffType.Custom:
+                return customCurve.Evaluate(t);
+
+            default:
+                return Mathf.SmoothStep(0f, 1f, t);
         }
     }
 
@@ -363,47 +557,79 @@ public class HeightsGenerator : MonoBehaviour
         System.Array.Copy(newHeights, heights, newHeights.Length);
     }
 
-    // Helper class for iteration data
+    // Enhanced helper class for iteration data with asymmetry features
     private class IterationData
     {
         public TerrainIteration iteration;
         public float seedOffsetX;
         public float seedOffsetY;
+        public float rotationAngle;
+        public float scaleVariationX;
+        public float scaleVariationY;
+        public float warpOffsetX;
+        public float warpOffsetY;
     }
 
-    float CalculateHeight(int x, int y, TerrainIteration iteration, Vector3 worldPos,
-                          int resolution, int maxTerrainDepth,
-                          float seedOffsetX, float seedOffsetY)
+    float CalculateHeight(int x, int y, IterationData data, Vector3 worldPos,
+                          int resolution, int maxTerrainDepth)
     {
         float worldPosOffsetX = worldPos.z / worldScale;
         float worldPosOffsetY = worldPos.x / worldScale;
 
+        // Base coordinates
         float xCoord = ((float)x / (resolution - 1)) * mapSize / worldScale +
-                        iteration.offsetX + worldOffsetX + worldPosOffsetX + seedOffsetX;
+                        data.iteration.offsetX + worldOffsetX + worldPosOffsetX + data.seedOffsetX;
 
         float yCoord = ((float)y / (resolution - 1)) * mapSize / worldScale +
-                        iteration.offsetY + worldOffsetY + worldPosOffsetY + seedOffsetY;
+                        data.iteration.offsetY + worldOffsetY + worldPosOffsetY + data.seedOffsetY;
+
+        // Apply rotation to break axis alignment
+        float cos = Mathf.Cos(data.rotationAngle * Mathf.Deg2Rad);
+        float sin = Mathf.Sin(data.rotationAngle * Mathf.Deg2Rad);
+        float rotatedX = xCoord * cos - yCoord * sin;
+        float rotatedY = xCoord * sin + yCoord * cos;
+
+        xCoord = rotatedX;
+        yCoord = rotatedY;
+
+        // Domain warping for more organic shapes
+        float warpStrength = asymmetryStrength * 0.1f;
+        float warpX = Mathf.PerlinNoise(xCoord * 0.1f + data.warpOffsetX, yCoord * 0.1f + data.warpOffsetY) * warpStrength;
+        float warpY = Mathf.PerlinNoise(xCoord * 0.1f + data.warpOffsetX + 100f, yCoord * 0.1f + data.warpOffsetY + 100f) * warpStrength;
+
+        xCoord += warpX;
+        yCoord += warpY;
 
         float amplitude = 1f;
-        float frequency = 1f / iteration.scale; // Use 'scale' to control initial feature size (smaller scale = larger features)
+        float frequency = 1f / data.iteration.scale;
         float noise = 0f;
         float totalAmplitude = 0f;
 
-        for (int o = 0; o < iteration.octaves; o++)
+        for (int o = 0; o < data.iteration.octaves; o++)
         {
-            float sampleX = xCoord * frequency * iteration.distortionX; // Apply distortion for more variety
-            float sampleY = yCoord * frequency * iteration.distortionY;
-            float perlinValue = Mathf.PerlinNoise(sampleX, sampleY);
+            // Apply asymmetric scaling to break uniformity
+            float sampleX = xCoord * frequency * data.iteration.distortionX * data.scaleVariationX;
+            float sampleY = yCoord * frequency * data.iteration.distortionY * data.scaleVariationY;
+
+            // Add slight offset per octave to break symmetry
+            float octaveOffsetX = o * 547.31f; // Prime-like numbers to avoid patterns
+            float octaveOffsetY = o * 739.17f;
+
+            float perlinValue = Mathf.PerlinNoise(sampleX + octaveOffsetX, sampleY + octaveOffsetY);
             noise += perlinValue * amplitude;
             totalAmplitude += amplitude;
-            amplitude *= iteration.persistence;
-            frequency *= iteration.lacunarity;
+            amplitude *= data.iteration.persistence;
+            frequency *= data.iteration.lacunarity;
         }
         noise /= totalAmplitude;
 
-        noise = iteration.depthScaling.Evaluate(noise * iteration.rarity - (1f - 1f / iteration.rarity) * iteration.rarity);
+        // Add asymmetric noise variation
+        float asymmetricVariation = 1f + (Mathf.PerlinNoise(xCoord * 0.05f + 1000f, yCoord * 0.05f + 1000f) - 0.5f) * asymmetryStrength;
+        noise *= asymmetricVariation;
 
-        return noise * iteration.depth / (float)maxTerrainDepth;
+        noise = data.iteration.depthScaling.Evaluate(noise * data.iteration.rarity - (1f - 1f / data.iteration.rarity) * data.iteration.rarity);
+
+        return noise * data.iteration.depth / (float)maxTerrainDepth;
     }
 
     // === Helpers for erosion ===

@@ -42,6 +42,13 @@ public class FirstPersonController : MonoBehaviour
             HandleMovement();
         if (canLook)
             HandleLook();
+
+        if(Input.GetKeyDown(KeyCode.Escape))
+        {
+            // Show cursor  
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = !Cursor.visible;
+        }
     }
 
     private void HandleMovement()
@@ -69,7 +76,7 @@ public class FirstPersonController : MonoBehaviour
         // Apply gravity
         if (isGrounded && velocity.y < 0)
         {
-            velocity.y = -2f;
+            velocity.y = gravity;
         }
         else
         {
@@ -115,7 +122,7 @@ public class FirstPersonController : MonoBehaviour
         float mouseX = Input.GetAxis("Mouse X") * lookSpeed * Time.deltaTime;
         float mouseY = Input.GetAxis("Mouse Y") * lookSpeed * Time.deltaTime;
 
-        xRotation += mouseY;
+        xRotation -= mouseY;
         xRotation = Mathf.Clamp(xRotation, -70f, 55f);
 
         playerHead.transform.localRotation = Quaternion.Euler(xRotation, 0f, 0f);
